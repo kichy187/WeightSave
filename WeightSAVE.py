@@ -20,6 +20,10 @@ class SkinWeightToolUI:
 
         self.window = cmds.window(self.window, title="ウェイトエクスポートツール", widthHeight=(400, 500))
         cmds.columnLayout(adjustableColumn=True, rowSpacing=10)
+        tabs = cmds.tabLayout(innerMarginWidth=5, innerMarginHeight=5)
+
+        # ---------- タブ1: エクスポート/インポート ----------
+        tab1 = cmds.columnLayout(adjustableColumn=True, rowSpacing=10)        
 
         cmds.text(label="IMPORT")
         self.widgets["fileList"] = cmds.textScrollList(numberOfRows=8, allowMultiSelection=False, height=150)
@@ -40,6 +44,18 @@ class SkinWeightToolUI:
         cmds.text(label=f"保存先: {self.folder_path}")
 
         cmds.button(label="ファイル一覧を更新", command=self.refresh_file_list)
+        cmds.setParent("..")  #たぶ1
+
+        # ---------- タブ2: 補間ツールなど ----------
+        tab2 = cmds.columnLayout(adjustableColumn=True, rowSpacing=10)
+        cmds.separator(h=10)
+        cmds.button(label="選択した項目順にグラデーション補完", command=self.interpolate_weights_along_vertices)
+        cmds.setParent("..")
+
+        cmds.tabLayout(tabs, edit=True, tabLabel=[
+            (tab1, "ウェイト I/O"),
+            (tab2, "補間ツール（仮）")
+        ])
 
         cmds.showWindow(self.window)
 
@@ -150,6 +166,43 @@ class SkinWeightToolUI:
             self.import_weights(mesh, file_path, mode_str)
 
         cmds.inViewMessage(amg="インポート完了", pos="topCenter", fade=True)
+
+    def interpolate_weights_along_vertices(self, *_):
+        #使用の場合は選択した順番に頂点を取得するため、プリファレンス→選択項目→選択順をトラック＆アウトライナの選択～～をONにしてください
+        sel = cmds.ls(os=True, fl=True)
+        if len(sel) < 3:
+            cmds.warning("3つ以上の頂点を順序付きで選択してください。")
+            return
+
+        start_vtx = sel[0]
+        end_vtx = sel[-1]
+        mesh = start_vtx.split(".vtx")[0]
+
+        # スキンクラスタ取得
+        skin_cluster = None
+        for node in cmds.listHistory(mesh):
+            if cmds.nodeType(node) == "skinCluster":
+                skin_cluster = node
+                break
+
+        if not skin_cluster:
+            cmds.warning(f"{mesh} にスキンクラスタが見つかりません。")
+            return
+
+        # インフルエンス取得
+        influences = cmds.skinCluster(skin_cluster, q=True, inf=True)
+        w_start = cmds.skinPercent(skin_cluster, start_vtx, q=True, v=True)
+        w_end = cmds.skinPercent(skin_cluster, end_vtx, q=True, v=True)
+
+        # グラデーション補間を各頂点に適用
+        total = len(sel) - 1  # 0〜NのN部分
+        for idx, vtx in enumerate(sel):
+            t = idx / total  # 0.0 ～ 1.0 の割合
+            w_interp = [(1 - t) * a + t * b for a, b in zip(w_start, w_end)]
+            weight_pairs = list(zip(influences, w_interp))
+            cmds.skinPercent(skin_cluster, vtx, transformValue=weight_pairs)
+
+        cmds.inViewMessage(amg="選択頂点にウェイトをグラデーション適用しました", pos="topCenter", fade=True)
 
 
 # 実行
