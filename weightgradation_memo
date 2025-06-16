@@ -1,0 +1,121 @@
+import maya.cmds as cmds
+import maya.api.OpenMaya as om
+import threading
+import time
+
+class RealtimeWeightVisualizer:
+    def __init__(self):
+        self.window = "RealtimeWeightVisualizerUI"
+        self.widgets = {}
+        self.running = False
+        self.prev_weights = []
+        self.mesh_name = None
+        self.skin_cluster = None
+        self.joint_name = None
+
+    def show(self):
+        if cmds.window(self.window, exists=True):
+            cmds.deleteUI(self.window)
+
+        self.window = cmds.window(self.window, title="リアルタイムウェイト可視化", widthHeight=(300, 300))
+        cmds.columnLayout(adjustableColumn=True, rowSpacing=8)
+
+        cmds.text(label="選択したメッシュからインフルエンスを取得")
+        cmds.button(label="インフルエンス一覧を取得", command=self.get_influences)
+        self.widgets["influenceList"] = cmds.textScrollList(height=100, allowMultiSelection=False)
+
+        cmds.button(label="リアルタイム可視化ON", command=self.start_realtime)
+        cmds.button(label="リアルタイム可視化OFF", command=self.stop_realtime)
+        cmds.button(label="現在のグレー反映（手動）", command=self.update_colors)
+
+        cmds.showWindow(self.window)
+
+    def get_skin_cluster(self, mesh):
+        history = cmds.listHistory(mesh)
+        skin_clusters = cmds.ls(history, type='skinCluster')
+        return skin_clusters[0] if skin_clusters else None
+
+    def get_influences(self, *_):
+        sel = cmds.ls(selection=True)
+        if not sel:
+            cmds.warning("メッシュを選択してください")
+            return
+
+        mesh = sel[0]
+        skin_cluster = self.get_skin_cluster(mesh)
+        if not skin_cluster:
+            cmds.warning("スキンクラスタが見つかりません")
+            return
+
+        self.mesh_name = mesh
+        self.skin_cluster = skin_cluster
+        influences = cmds.skinCluster(skin_cluster, query=True, influence=True)
+
+        cmds.textScrollList(self.widgets["influenceList"], edit=True, removeAll=True)
+        for jnt in influences:
+            cmds.textScrollList(self.widgets["influenceList"], edit=True, append=jnt)
+
+    def update_colors(self, *_):
+        if not self.mesh_name or not self.joint_name or not self.skin_cluster:
+            cmds.warning("対象メッシュまたはジョイントが未指定です")
+            return
+
+        verts = cmds.ls(f"{self.mesh_name}.vtx[*]", flatten=True)
+        weights = [cmds.skinPercent(self.skin_cluster, vtx, query=True, transform=self.joint_name) for vtx in verts]
+        gray_colors = [(w, w, w) for w in weights]
+        self.apply_vertex_colors(self.mesh_name, gray_colors)
+
+    def apply_vertex_colors(self, geo, rgb_colors):
+        shape = cmds.listRelatives(geo, shapes=True, fullPath=True)[0]
+        color_set = "realtimeGraySet"
+
+        if color_set not in (cmds.polyColorSet(shape, query=True, allColorSets=True) or []):
+            cmds.polyColorSet(shape, create=True, colorSet=color_set)
+        cmds.polyColorSet(shape, currentColorSet=True, colorSet=color_set)
+
+        for i, (r, g, b) in enumerate(rgb_colors):
+            cmds.polyColorPerVertex(f"{geo}.vtx[{i}]", rgb=(r, g, b), colorDisplayOption=True)
+
+        cmds.setAttr(f"{shape}.displayColors", 1)
+
+    def start_realtime(self, *_):
+        selected = cmds.textScrollList(self.widgets["influenceList"], query=True, selectItem=True)
+        if not selected:
+            cmds.warning("インフルエンスを選択してください")
+            return
+
+        self.joint_name = selected[0]
+
+        if not self.mesh_name or not self.skin_cluster:
+            cmds.warning("インフルエンス取得を先に実行してください")
+            return
+
+        # スレッドを止めてから再起動
+        if self.running:
+            self.running = False
+            if self.thread:
+                self.thread.join(timeout=1.0)  # 前のスレッドを安全に終了
+
+        self.running = True
+        self.prev_weights = []
+        self.thread = threading.Thread(target=self.monitor_loop, daemon=True)
+        self.thread.start()
+
+    def stop_realtime(self, *_):
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=1.0)
+
+    def monitor_loop(self):
+        while self.running:
+            verts = cmds.ls(f"{self.mesh_name}.vtx[*]", flatten=True)
+            weights = [cmds.skinPercent(self.skin_cluster, vtx, query=True, transform=self.joint_name) for vtx in verts]
+            if weights != self.prev_weights:
+                gray_colors = [(w, w, w) for w in weights]
+                cmds.evalDeferred(lambda: self.apply_vertex_colors(self.mesh_name, gray_colors))
+                self.prev_weights = weights
+            time.sleep(0.5)
+
+# 実行
+realtime_ui = RealtimeWeightVisualizer()
+realtime_ui.show()
