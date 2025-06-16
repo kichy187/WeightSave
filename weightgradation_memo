@@ -1,121 +1,102 @@
 import maya.cmds as cmds
-import maya.api.OpenMaya as om
-import threading
-import time
 
-class RealtimeWeightVisualizer:
+class WeightInterpolationWithFixedInfluence:
     def __init__(self):
-        self.window = "RealtimeWeightVisualizerUI"
+        self.window = "WeightInterpolationWithFixUI"
         self.widgets = {}
-        self.running = False
-        self.prev_weights = []
-        self.mesh_name = None
-        self.skin_cluster = None
-        self.joint_name = None
+        self.fixed_influence = None
+        
+        self.show()
+        
 
     def show(self):
         if cmds.window(self.window, exists=True):
             cmds.deleteUI(self.window)
 
-        self.window = cmds.window(self.window, title="リアルタイムウェイト可視化", widthHeight=(300, 300))
-        cmds.columnLayout(adjustableColumn=True, rowSpacing=8)
+        self.window = cmds.window(self.window, title="補間ツール(インフルエンス固定)", widthHeight=(400, 200))
+        cmds.columnLayout(adjustableColumn=True, rowSpacing=10)
 
-        cmds.text(label="選択したメッシュからインフルエンスを取得")
-        cmds.button(label="インフルエンス一覧を取得", command=self.get_influences)
-        self.widgets["influenceList"] = cmds.textScrollList(height=100, allowMultiSelection=False)
+        cmds.button(label="選択メッシュからインフルエンス一覧を取得", command=self.get_influences)
+        self.widgets["influenceList"] = cmds.textScrollList(allowMultiSelection=False, height=80)
 
-        cmds.button(label="リアルタイム可視化ON", command=self.start_realtime)
-        cmds.button(label="リアルタイム可視化OFF", command=self.stop_realtime)
-        cmds.button(label="現在のグレー反映（手動）", command=self.update_colors)
+        cmds.floatSliderGrp('powerSlider', label='曲線度 (0.1〜5.0)', field=True, minValue=0.1, maxValue=5.0, value=1.0)
+
+        cmds.button(label="選択頂点に補間を適用", command=self.apply_interpolation)
 
         cmds.showWindow(self.window)
+
+    def get_influences(self, *_):
+        sel = cmds.ls(sl=True)
+        if not sel:
+            cmds.warning("メッシュを選択してください。")
+            return
+
+        mesh = sel[0]
+        skin = self.get_skin_cluster(mesh)
+        if not skin:
+            cmds.warning("スキンクラスタが見つかりません。")
+            return
+
+        influences = cmds.skinCluster(skin, q=True, inf=True)
+        cmds.textScrollList(self.widgets["influenceList"], e=True, removeAll=True)
+        for inf in influences:
+            cmds.textScrollList(self.widgets["influenceList"], e=True, append=inf)
 
     def get_skin_cluster(self, mesh):
         history = cmds.listHistory(mesh)
         skin_clusters = cmds.ls(history, type='skinCluster')
         return skin_clusters[0] if skin_clusters else None
 
-    def get_influences(self, *_):
-        sel = cmds.ls(selection=True)
-        if not sel:
-            cmds.warning("メッシュを選択してください")
+    def apply_interpolation(self, *_):
+        sel = cmds.ls(os=True, fl=True)
+        if len(sel) < 3:
+            cmds.warning("3つ以上の頂点を順序付きで選択してください。")
             return
 
-        mesh = sel[0]
-        skin_cluster = self.get_skin_cluster(mesh)
-        if not skin_cluster:
-            cmds.warning("スキンクラスタが見つかりません")
+        start_vtx = sel[0]
+        end_vtx = sel[-1]
+        mesh = start_vtx.split(".vtx")[0]
+        skin = self.get_skin_cluster(mesh)
+        if not skin:
+            cmds.warning("スキンクラスタが見つかりません。")
             return
 
-        self.mesh_name = mesh
-        self.skin_cluster = skin_cluster
-        influences = cmds.skinCluster(skin_cluster, query=True, influence=True)
-
-        cmds.textScrollList(self.widgets["influenceList"], edit=True, removeAll=True)
-        for jnt in influences:
-            cmds.textScrollList(self.widgets["influenceList"], edit=True, append=jnt)
-
-    def update_colors(self, *_):
-        if not self.mesh_name or not self.joint_name or not self.skin_cluster:
-            cmds.warning("対象メッシュまたはジョイントが未指定です")
+        influences = cmds.skinCluster(skin, q=True, inf=True)
+        fixed_infl = cmds.textScrollList(self.widgets["influenceList"], q=True, selectItem=True)
+        if not fixed_infl:
+            cmds.warning("固定インフルエンスを選択してください。")
             return
+        fixed = fixed_infl[0]
 
-        verts = cmds.ls(f"{self.mesh_name}.vtx[*]", flatten=True)
-        weights = [cmds.skinPercent(self.skin_cluster, vtx, query=True, transform=self.joint_name) for vtx in verts]
-        gray_colors = [(w, w, w) for w in weights]
-        self.apply_vertex_colors(self.mesh_name, gray_colors)
+        power = cmds.floatSliderGrp('powerSlider', q=True, value=True)
 
-    def apply_vertex_colors(self, geo, rgb_colors):
-        shape = cmds.listRelatives(geo, shapes=True, fullPath=True)[0]
-        color_set = "realtimeGraySet"
+        w_start = cmds.skinPercent(skin, start_vtx, q=True, v=True)
+        w_end = cmds.skinPercent(skin, end_vtx, q=True, v=True)
 
-        if color_set not in (cmds.polyColorSet(shape, query=True, allColorSets=True) or []):
-            cmds.polyColorSet(shape, create=True, colorSet=color_set)
-        cmds.polyColorSet(shape, currentColorSet=True, colorSet=color_set)
+        total = len(sel) - 1
 
-        for i, (r, g, b) in enumerate(rgb_colors):
-            cmds.polyColorPerVertex(f"{geo}.vtx[{i}]", rgb=(r, g, b), colorDisplayOption=True)
+        for idx, vtx in enumerate(sel):
+            t_raw = idx / total
+            t = t_raw ** power
 
-        cmds.setAttr(f"{shape}.displayColors", 1)
+            w_interp = []
+            fixed_idx = influences.index(fixed)
+            fixed_val = cmds.skinPercent(skin, vtx, transform=fixed, q=True)
 
-    def start_realtime(self, *_):
-        selected = cmds.textScrollList(self.widgets["influenceList"], query=True, selectItem=True)
-        if not selected:
-            cmds.warning("インフルエンスを選択してください")
-            return
+            for i, (a, b) in enumerate(zip(w_start, w_end)):
+                if i == fixed_idx:
+                    w_interp.append(fixed_val)
+                else:
+                    w = ((1 - t) * a + t * b)
+                    w_interp.append(w)
 
-        self.joint_name = selected[0]
+            # 正規化（合計が1になるよう補正）
+            total_w = sum(w_interp)
+            if total_w > 0.0:
+                w_interp = [w / total_w for w in w_interp]
 
-        if not self.mesh_name or not self.skin_cluster:
-            cmds.warning("インフルエンス取得を先に実行してください")
-            return
+            weight_pairs = list(zip(influences, w_interp))
+            cmds.skinPercent(skin, vtx, transformValue=weight_pairs)
 
-        # スレッドを止めてから再起動
-        if self.running:
-            self.running = False
-            if self.thread:
-                self.thread.join(timeout=1.0)  # 前のスレッドを安全に終了
-
-        self.running = True
-        self.prev_weights = []
-        self.thread = threading.Thread(target=self.monitor_loop, daemon=True)
-        self.thread.start()
-
-    def stop_realtime(self, *_):
-        self.running = False
-        if self.thread:
-            self.thread.join(timeout=1.0)
-
-    def monitor_loop(self):
-        while self.running:
-            verts = cmds.ls(f"{self.mesh_name}.vtx[*]", flatten=True)
-            weights = [cmds.skinPercent(self.skin_cluster, vtx, query=True, transform=self.joint_name) for vtx in verts]
-            if weights != self.prev_weights:
-                gray_colors = [(w, w, w) for w in weights]
-                cmds.evalDeferred(lambda: self.apply_vertex_colors(self.mesh_name, gray_colors))
-                self.prev_weights = weights
-            time.sleep(0.5)
-
-# 実行
-realtime_ui = RealtimeWeightVisualizer()
-realtime_ui.show()
+        cmds.inViewMessage(amg="補間適用完了（固定インフルエンスあり）", pos="topCenter", fade=True)
+WeightInterpolationWithFixedInfluence()
